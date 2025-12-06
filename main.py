@@ -1,30 +1,42 @@
 import tkinter as tk
-from tkinter import scrolledtext
-from controller import run_analysis, save_text
+import os
+from controller import run_analysis, export_formatted_html
 from settings import open_settings
 
 def main():
     root = tk.Tk()
     root.title("TRPGログビューア Ver2")
+    root.geometry("800x120")
 
-    display_mode = tk.StringVar(root, value="foreground")
+    # Control panel (top frame)
+    control_frame = tk.Frame(root)
+    control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
 
-    output_area = scrolledtext.ScrolledText(
-        root, width=100, height=40, font=("MS Gothic", 11), bg="white", fg="black"
-    )
-    output_area.config(tabs=("2c"))
+    # File selection and color/settings/export
+    def on_analyze_clicked():
+        run_analysis()
+        update_file_label()
 
-    frame = tk.Frame(root)
-    frame.pack(pady=10)
+    tk.Button(control_frame, text="ログファイルを選んで解析",
+              command=on_analyze_clicked).pack(side=tk.LEFT, padx=5)
 
-    tk.Button(frame, text="ログファイルを選んで解析",
-              command=lambda: run_analysis(output_area, display_mode)).pack(side=tk.LEFT, padx=5)
-    tk.Button(frame, text="設定",
-              command=lambda: open_settings(root, output_area, display_mode)).pack(side=tk.LEFT, padx=5)
-    tk.Button(frame, text="結果をテキスト保存",
-              command=lambda: save_text(output_area)).pack(side=tk.LEFT, padx=5)
+    tk.Button(control_frame, text="色・設定",
+              command=lambda: open_settings(root)).pack(side=tk.LEFT, padx=5)
 
-    output_area.pack(padx=10, pady=10)
+    tk.Button(control_frame, text="整形済みHTMLを保存",
+              command=export_formatted_html).pack(side=tk.LEFT, padx=5)
+
+    # File path display label
+    file_label = tk.Label(root, text="ファイル: 未選択", fg="#666", justify=tk.LEFT)
+    file_label.pack(side=tk.TOP, fill=tk.X, padx=10, pady=2)
+
+    def update_file_label():
+        import controller
+        if controller.last_file_path:
+            filename = os.path.basename(controller.last_file_path)
+            file_label.config(text=f"ファイル: {filename}", font=("Arial", 11, "bold"))
+        else:
+            file_label.config(text="ファイル: 未選択")
 
     root.mainloop()
 
