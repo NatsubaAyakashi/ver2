@@ -41,6 +41,10 @@ def build_formatted_html(input_file_path, settings=None):
     else:
         body_parts = _build_body_old_format(soup, unique_tabs, player_order, settings)
 
+    # f-string内でのバックスラッシュ使用回避のため、事前に結合する
+    css_content = '\n'.join('\t\t' + l for l in css_lines)
+    body_content = '\n'.join('\t' + p for p in body_parts)
+
     # 4. HTML結合フェーズ
     full_html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -49,12 +53,12 @@ def build_formatted_html(input_file_path, settings=None):
 \t<meta name="viewport" content="width=device-width, initial-scale=1.0">
 \t<title>{settings.get('html_title', '整形済みログ')}</title>
 \t<style>
-{chr(10).join('\t\t'+l for l in css_lines)}
+{css_content}
 \t</style>
 </head>
 <body>
 \t<h1>{settings.get('html_title', '整形済みログ')}</h1>
-{chr(10).join('\t'+p for p in body_parts)}
+{body_content}
 </body>
 </html>
 """
