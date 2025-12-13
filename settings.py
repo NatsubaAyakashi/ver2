@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import colorchooser
-from config import config
+from config import config, save_config
 import controller
 from controller import re_run_analysis
 
@@ -53,46 +53,27 @@ def open_settings(root):
     # 行カウンタ
     row_counter = {'r': 1}
 
-    def make_section(title):
+    def make_collapsible_section(title, collapsed_by_default=False):
         """折りたたみ可能なセクションを作る"""
         hdr = tk.Frame(inner)
         r = row_counter['r']
         hdr.grid(row=r, column=0, columnspan=3, sticky='we', pady=(8,0), padx=4)
         lbl = tk.Label(hdr, text=title, font=('Arial', 10, 'bold'))
         lbl.pack(side='left')
-        toggle = tk.Button(hdr, text='−', width=2)
+        
+        initial_text = '+' if collapsed_by_default else '−'
+        toggle = tk.Button(hdr, text=initial_text, width=2)
         toggle.pack(side='left', padx=6)
         row_counter['r'] += 1
-        content = tk.Frame(inner, relief='flat', borderwidth=0)
-        content.grid(row=row_counter['r'], column=0, columnspan=3, sticky='we', padx=8)
-        collapsed = {'state': False}
-        def _toggle():
-            if collapsed['state']:
-                content.grid()
-                toggle.config(text='−')
-                collapsed['state'] = False
-            else:
-                content.grid_remove()
-                toggle.config(text='+')
-                collapsed['state'] = True
-        toggle.config(command=_toggle)
-        row_counter['r'] += 1
-        return content, toggle, collapsed
 
-    def make_section_collapsed(title):
-        """折りたたみ可能なセクションを作る（デフォルトで閉じた状態）"""
-        hdr = tk.Frame(inner)
-        r = row_counter['r']
-        hdr.grid(row=r, column=0, columnspan=3, sticky='we', pady=(8,0), padx=4)
-        lbl = tk.Label(hdr, text=title, font=('Arial', 10, 'bold'))
-        lbl.pack(side='left')
-        toggle = tk.Button(hdr, text='+', width=2)
-        toggle.pack(side='left', padx=6)
-        row_counter['r'] += 1
         content = tk.Frame(inner, relief='flat', borderwidth=0)
         content.grid(row=row_counter['r'], column=0, columnspan=3, sticky='we', padx=8)
-        content.grid_remove()  # 初期状態で非表示
-        collapsed = {'state': True}
+        
+        if collapsed_by_default:
+            content.grid_remove()
+
+        collapsed = {'state': collapsed_by_default}
+        
         def _toggle():
             if collapsed['state']:
                 content.grid()
@@ -102,6 +83,7 @@ def open_settings(root):
                 content.grid_remove()
                 toggle.config(text='+')
                 collapsed['state'] = True
+        
         toggle.config(command=_toggle)
         row_counter['r'] += 1
         return content, toggle, collapsed
@@ -141,7 +123,7 @@ def open_settings(root):
 
     # タブセクション
     if tabs:
-        tab_section, _, _ = make_section('タブ色・ボーダー')
+        tab_section, _, _ = make_collapsible_section('タブ色・ボーダー')
         for t in tabs:
             # タブの色設定フレーム
             t_frame = tk.Frame(tab_section)
@@ -211,13 +193,13 @@ def open_settings(root):
     detail_players = [ (n,i) for n,i in sorted_players if isinstance(i, dict) ][top_n:]
 
     if main_players:
-        player_section = make_section('プレイヤー色')[0]
+        player_section = make_collapsible_section('プレイヤー色')[0]
         for name, info in main_players:
             initial = config.get('players', {}).get(name, {}).get('color', info.get('color') or '')
             add_color_item(player_section, name, initial, player_vars)
 
     if detail_players:
-        detail_section, _, _ = make_section_collapsed('詳細 - 低頻出プレイヤー')
+        detail_section, _, _ = make_collapsible_section('詳細 - 低頻出プレイヤー', collapsed_by_default=True)
         for name, info in detail_players:
             initial = config.get('players', {}).get(name, {}).get('color', info.get('color') or '')
             add_color_item(detail_section, name, initial, player_vars)
@@ -251,6 +233,8 @@ def open_settings(root):
                 config['players'][pname] = {}
             if v.get().strip():
                 config['players'][pname]['color'] = v.get().strip()
+
+        save_config(config)
 
         # re-run analysis to refresh stored structure
         cleanup_bindings()
