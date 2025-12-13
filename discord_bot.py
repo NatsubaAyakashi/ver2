@@ -5,10 +5,17 @@ import io
 import zipfile
 import json
 from renderer import build_formatted_html
+from dotenv import load_dotenv
+from keep_alive import keep_alive
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
 
 # ==========================================
-# ここにBotのトークンを入力してください
-TOKEN = 'YOUR_DISCORD_BOT_TOKEN_HERE'
+# Botのトークンを環境変数から取得
+TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("Botトークンが設定されていません。.envファイルを作成し、DISCORD_BOT_TOKENを設定してください。")
 
 # 反応するチャンネルIDのリスト (空の場合は全チャンネルで反応)
 # 例: ALLOWED_CHANNEL_IDS = [123456789012345678, 987654321098765432]
@@ -266,4 +273,6 @@ async def on_message(message):
                     if tmp_input_path and os.path.exists(tmp_input_path):
                         os.remove(tmp_input_path)
 
+# Webサーバーを起動してポートをリッスン（Render等のWeb Service用）
+keep_alive()
 client.run(TOKEN)
