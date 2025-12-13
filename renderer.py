@@ -124,8 +124,8 @@ def _generate_css(settings, unique_tabs, player_order, player_color_map):
     """CSS定義のリストを生成する"""
     css_lines = [
         "html { font-size: 14px; }",
-        f"body {{ -webkit-text-size-adjust: 100%; background-color: {settings.get('global_background', '#ffffff')}; }}",
-        "h1 { font-size: 20px; margin: 1rem 1rem 0; color: #000; }",
+        f"body {{ -webkit-text-size-adjust: 100%; background-color: {settings.get('global_background', '#ffffff')}; color: {settings.get('global_color', '#000000')}; }}",
+        f"h1 {{ font-size: 20px; margin: 1rem 1rem 0; color: {settings.get('global_color', '#000000')}; }}",
         ".tab { border: 1px solid #999; margin: 2rem 1rem 1rem; line-height: 1.5; position: relative; }",
         ".tabtitle { border: 1px solid transparent; border-color: inherit; background-color: inherit; position: absolute; top: -.8rem; left: 1rem; min-width: 7rem; padding: 0 .5rem; text-align: center; font-size: 1rem; z-index: 9999; line-height: 1.4rem; }",
         ".player { margin: 0; padding: 0 .5rem; padding-left: 10.5rem; border-bottom: 1px dotted transparent; border-color: inherit; position: relative; }",
@@ -147,7 +147,7 @@ def _generate_css(settings, unique_tabs, player_order, player_color_map):
         tconf = settings.get('tabs', {}).get(t, {})
         bg = tconf.get('background') if tconf else settings.get('tab_default_background', '#ffffff')
         border = tconf.get('border') if tconf else settings.get('tab_default_border', '#999999')
-        color = tconf.get('color') if tconf else '#000'
+        color = tconf.get('color') if tconf else settings.get('global_color', '#000000')
         font_size = tconf.get('font_size') if tconf else None
         if not bg:
             bg = settings.get('tab_default_background', '#ffffff')
@@ -186,7 +186,11 @@ def _build_body_new_format(soup, unique_tabs, player_order, settings):
             pidx = player_order.index(name) if name in player_order else -1
             pclass = f'p{pidx}' if pidx >= 0 else ''
 
-            part.append(f'<p class="player {pclass}"><b>{name}</b>')
+            # 行ごとの色を取得し、あればstyle属性に設定
+            p_color = extract_color_from_p_or_spans(p)
+            style_attr = f' style="color: {p_color};"' if p_color else ''
+
+            part.append(f'<p class="player {pclass}"{style_attr}><b>{name}</b>')
             text = p.get_text("\n", strip=True)
             text = re.sub(r'＞\s*(\d{1,3})', r'＞ <span class="diceroll">\1</span>', text)
 
@@ -206,6 +210,7 @@ def _build_body_old_format(soup, unique_tabs, player_order, settings):
     all_p_elements = soup.find_all('p')
     current_tab = None
     current_speaker = None
+    current_color = None
     current_pclass = ''
     current_text_lines = []
     part = None
@@ -223,11 +228,15 @@ def _build_body_old_format(soup, unique_tabs, player_order, settings):
         text = ''.join(text_parts).strip()
         text = re.sub(r'＞\s*(\d{1,3})', r'＞ <span class="diceroll">\1</span>', text)
 
+        # この行の色を取得
+        this_color = extract_color_from_p_or_spans(p_elem)
+
         # タブが変わった場合
         if tab_name != current_tab:
             # 前のスピーカーブロックを閉じる
             if current_speaker is not None and part is not None:
-                part.append(f'<p class="player {current_pclass}"><b>{current_speaker}</b>')
+                style_attr = f' style="color: {current_color};"' if current_color else ''
+                part.append(f'<p class="player {current_pclass}"{style_attr}><b>{current_speaker}</b>')
                 for line in current_text_lines:
                     part.append(line + '<br>')
                 part.append('</p>')
@@ -247,13 +256,15 @@ def _build_body_old_format(soup, unique_tabs, player_order, settings):
                 tab_style = f' style="background-color: {tconf.get("background")};"'
             part = [f'<div class="tab t{t_idx}"{tab_style}>', f'<div class="tabtitle">{tab_name}</div>']
             current_speaker = None
+            current_color = None
             current_text_lines = []
 
-        # スピーカーが変わった場合
-        if speaker_name != current_speaker:
+        # スピーカーが変わった場合、または色が変わった場合
+        if speaker_name != current_speaker or this_color != current_color:
             # 前のスピーカーブロックを閉じる
             if current_speaker is not None and part is not None:
-                part.append(f'<p class="player {current_pclass}"><b>{current_speaker}</b>')
+                style_attr = f' style="color: {current_color};"' if current_color else ''
+                part.append(f'<p class="player {current_pclass}"{style_attr}><b>{current_speaker}</b>')
                 for line in current_text_lines:
                     part.append(line + '<br>')
                 part.append('</p>')
@@ -261,6 +272,7 @@ def _build_body_old_format(soup, unique_tabs, player_order, settings):
 
             # 新しいスピーカーを開始
             current_speaker = speaker_name
+            current_color = this_color
             pidx = player_order.index(speaker_name) if speaker_name in player_order else -1
             current_pclass = f'p{pidx}' if pidx >= 0 else ''
 
@@ -273,7 +285,8 @@ def _build_body_old_format(soup, unique_tabs, player_order, settings):
 
     # 最後のブロックを閉じる
     if current_speaker is not None and part is not None:
-        part.append(f'<p class="player {current_pclass}"><b>{current_speaker}</b>')
+        style_attr = f' style="color: {current_color};"' if current_color else ''
+        part.append(f'<p class="player {current_pclass}"{style_attr}><b>{current_speaker}</b>')
         for line in current_text_lines:
             part.append(line + '<br>')
         part.append('</p>')
