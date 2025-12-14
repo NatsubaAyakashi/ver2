@@ -4,6 +4,7 @@ import tempfile
 import io
 import zipfile
 import json
+import asyncio
 from renderer import build_formatted_html
 from dotenv import load_dotenv
 from keep_alive import keep_alive
@@ -389,8 +390,8 @@ async def on_message(message):
                     # 1. 添付ファイルを一時ファイルとして保存
                     # renderer.py はファイルパスを要求するため、一度ディスクに保存します
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_input:
-                        await attachment.save(tmp_input.name)
                         tmp_input_path = tmp_input.name
+                        await attachment.save(tmp_input.name)
 
                     # 2. Bot用の設定（サーバー設定を適用）
                     guild_id = str(message.guild.id) if message.guild else "dm"
@@ -459,10 +460,16 @@ async def on_message(message):
 
                     # 元のメッセージも設定時間後に削除
                     if delete_param:
-                        try:
-                            await message.delete(delay=delete_param)
-                        except Exception:
-                            pass
+                        # バックグラウンドで削除を実行（権限エラーをログに出力）
+                        async def delete_user_message(msg, delay):
+                            await asyncio.sleep(delay)
+                            try:
+                                await msg.delete()
+                            except discord.Forbidden:
+                                print(f"⚠️ 権限エラー: メッセージを削除できませんでした。Botに「メッセージの管理」権限を与えてください。")
+                            except Exception:
+                                pass
+                        asyncio.create_task(delete_user_message(message, delete_param))
 
                 except discord.HTTPException as e:
                     if e.status == 413:
@@ -484,7 +491,10 @@ async def on_message(message):
 
                     # 5. 入力用の一時ファイルを削除（後始末）
                     if tmp_input_path and os.path.exists(tmp_input_path):
-                        os.remove(tmp_input_path)
+                        try:
+                            os.remove(tmp_input_path)
+                        except Exception as e:
+                            print(f"Error removing temp file: {e}")
 
 # Webサーバーを起動してポートをリッスン（Render等のWeb Service用）
 keep_alive()
