@@ -363,7 +363,7 @@ async def on_message(message):
             "**設定コマンド** (サーバーごとに保存されます)\n"
             "`!settings` : 現在の設定を表示\n"
             "`!preset name` : プリセットを適用 (light/dark/black)\n"
-            "`!set_bg #RRGGBB` : 全体の背景色を変更 (例: `!set_bg #202020`)\n"
+            "`!set_bg #RRGGBB` : 全体の背景色を変更\n"
             "`!set_text_color #RRGGBB` : 文字色を変更\n"
             "`!set_tab_bg #RRGGBB` : タブの背景色を変更\n"
             "`!set_tab_border #RRGGBB` : タブの枠線色を変更\n"
