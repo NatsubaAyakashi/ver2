@@ -252,7 +252,7 @@ async def on_message(message):
     if message.content.startswith('!set_auto_delete'):
         parts = message.content.split()
         if len(parts) < 2:
-            await message.channel.send("ℹ️ 使用法: `!set_auto_delete 秒数` (例: `!set_auto_delete 60`)\n※0を指定すると自動削除が無効になります。")
+            await message.channel.send("ℹ️ 使用法: `!set_auto_delete 秒数` (例: `!set_auto_delete 60`)\n※0を指定すると自動削除が無効になります。\n※有効にすると、変換結果と元のメッセージの両方が削除されます。")
             return
 
         try:
@@ -271,9 +271,9 @@ async def on_message(message):
         save_all_settings(server_settings_cache)
 
         if seconds == 0:
-            await message.channel.send("⏱️ 変換結果の自動削除を **無効** にしました。")
+            await message.channel.send("⏱️ 自動削除を **無効** にしました。")
         else:
-            await message.channel.send(f"⏱️ 変換結果の自動削除時間を `{seconds}` 秒に設定しました。")
+            await message.channel.send(f"⏱️ 自動削除時間を `{seconds}` 秒に設定しました。\n（変換結果と元のメッセージが対象です）")
         return
 
     # プリセット設定: !preset name
@@ -367,7 +367,7 @@ async def on_message(message):
             "`!set_text_color #RRGGBB` : 文字色を変更\n"
             "`!set_tab_bg #RRGGBB` : タブの背景色を変更\n"
             "`!set_tab_border #RRGGBB` : タブの枠線色を変更\n"
-            "`!set_auto_delete 秒数` : 結果の自動削除時間を設定 (0で無効)\n"
+            "`!set_auto_delete 秒数` : 結果と元メッセージの自動削除時間を設定 (0で無効)\n"
             "`!reset_settings` : 設定を初期状態(白背景)に戻す\n"
         )
         await message.channel.send(help_text)
@@ -382,7 +382,7 @@ async def on_message(message):
         for attachment in message.attachments:
             # HTMLファイルのみ対象（拡張子チェック）
             if attachment.filename.lower().endswith('.html'):
-                await message.channel.send(f'🔄 `{attachment.filename}` を変換しています...')
+                processing_msg = await message.channel.send(f'🔄 `{attachment.filename}` を変換しています...')
 
                 tmp_input_path = None
                 try:
@@ -425,7 +425,7 @@ async def on_message(message):
                     delete_msg = ""
                     delete_param = None
                     if auto_delete_time > 0:
-                        delete_msg = f"\n※このメッセージは{auto_delete_time}秒後に自動削除されます。"
+                        delete_msg = f"\n※このメッセージは{auto_delete_time}秒後に自動削除されます。（元のメッセージも削除されます）"
                         delete_param = auto_delete_time
 
                     # 4. 結果をDiscordに送信
@@ -457,6 +457,13 @@ async def on_message(message):
                         delete_after=delete_param
                     )
 
+                    # 元のメッセージも設定時間後に削除
+                    if delete_param:
+                        try:
+                            await message.delete(delay=delete_param)
+                        except Exception:
+                            pass
+
                 except discord.HTTPException as e:
                     if e.status == 413:
                         await message.channel.send(f"{message.author.mention} ❌ ファイルサイズが大きすぎて送信できませんでした（圧縮後も制限超過）。")
@@ -469,6 +476,12 @@ async def on_message(message):
                     print(f"Error converting {attachment.filename}: {e}")
 
                 finally:
+                    # 変換中メッセージを削除
+                    try:
+                        await processing_msg.delete()
+                    except Exception:
+                        pass
+
                     # 5. 入力用の一時ファイルを削除（後始末）
                     if tmp_input_path and os.path.exists(tmp_input_path):
                         os.remove(tmp_input_path)
