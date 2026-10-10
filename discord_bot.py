@@ -1,13 +1,34 @@
-import discord
-import os
-import tempfile
-import io
-import zipfile
-import json
 import asyncio
-from renderer import build_formatted_html
-from dotenv import load_dotenv
-from keep_alive import keep_alive
+import io
+import logging
+import os
+
+import discord
+
+from bot_logic import (
+    COLOR_COMMANDS,
+    DEFAULT_SETTINGS,
+    MAX_ATTACHMENT_BYTES,
+    PRESETS,
+    apply_auto_delete_time,
+    apply_color_setting,
+    apply_preset,
+    build_bot_settings,
+    color_or_default,
+    display_filename,
+    get_auto_delete_time,
+    get_guild_key,
+    is_attachment_too_large,
+    is_html_filename,
+    is_valid_color,
+    load_settings,
+    package_output,
+    parse_auto_delete_seconds,
+    parse_command,
+    reset_guild_settings,
+    save_settings,
+)
+from renderer import build_formatted_html_from_string
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -15,65 +36,35 @@ try:
 except ImportError:
     HAS_PIL = False
 
-# .envファイルから環境変数を読み込む
-load_dotenv()
-
-# ==========================================
-# Botのトークンを環境変数から取得
-TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-if not TOKEN:
-    raise ValueError("Botトークンが設定されていません。.envファイルを作成し、DISCORD_BOT_TOKENを設定してください。")
+logger = logging.getLogger(__name__)
 
 # 反応するチャンネルIDのリスト (空の場合は全チャンネルで反応)
 # 例: ALLOWED_CHANNEL_IDS = [123456789012345678, 987654321098765432]
 ALLOWED_CHANNEL_IDS = []
-# ==========================================
-
-# プリセット定義
-PRESETS = {
-    "light": {
-        "global_background": "#ffffff",
-        "global_color": "#000000",
-        "tab_default_background": "#ffffff",
-        "tab_default_border": "#999999",
-        "description": "ライトモード (デフォルト)"
-    },
-    "dark": {
-        "global_background": "#202020",
-        "global_color": "#ffffff",
-        "tab_default_background": "#333333",
-        "tab_default_border": "#555555",
-        "description": "ダークモード (目に優しい暗色)"
-    },
-    "black": {
-        "global_background": "#000000",
-        "global_color": "#ffffff",
-        "tab_default_background": "#000000",
-        "tab_default_border": "#444444",
-        "description": "ブラックモード (ハイコントラスト)"
-    }
-}
 
 # サーバーごとの設定を保存するファイル
 SETTINGS_FILE = "server_settings.json"
 
-# 設定を読み込む関数
-def load_all_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"設定読み込みエラー: {e}")
-    return {}
+# サーバー設定のキャッシュ。起動時に main() で読み込む
+server_settings_cache = {}
 
-# 設定を保存する関数
-def save_all_settings(settings):
-    try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        print(f"設定保存エラー: {e}")
+# Intentsの設定（メッセージ内容と添付ファイルの読み取り権限が必要）
+intents = discord.Intents.default()
+intents.message_content = True
+
+# 変換結果のメンションはユーザーにのみ反応させる（@everyone等は無効）
+client = discord.Client(
+    intents=intents,
+    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+)
+
+_background_tasks = set()
+
+COLOR_FORMAT_ERROR = "❌ 色は `#RGB` または `#RRGGBB` の形式で指定してください。"
+CONVERT_ERROR = "❌ 変換中にエラーが発生しました。ログのHTML形式を確認してください。"
+DECODE_ERROR = "❌ ファイルを読み取れませんでした。UTF-8形式のHTMLファイルをアップロードしてください。"
+DISCORD_ERROR = "❌ Discordとの通信でエラーが発生しました。しばらくしてからもう一度お試しください。"
+
 
 # プレビュー画像を生成する関数
 def generate_preview_image(preset_data):
@@ -81,15 +72,12 @@ def generate_preview_image(preset_data):
         return None
 
     width, height = 400, 150
-    bg_color = preset_data.get("global_background", "#ffffff")
-    tab_bg = preset_data.get("tab_default_background", "#ffffff")
-    tab_border = preset_data.get("tab_default_border", "#999999")
+    bg_color = color_or_default(preset_data.get("global_background"), "global_background")
+    tab_bg = color_or_default(preset_data.get("tab_default_background"), "tab_default_background")
+    tab_border = color_or_default(preset_data.get("tab_default_border"), "tab_default_border")
+    text_color = color_or_default(preset_data.get("global_color"), "global_color")
 
-    try:
-        image = Image.new('RGB', (width, height), color=bg_color)
-    except ValueError:
-        image = Image.new('RGB', (width, height), color="#ffffff")
-
+    image = Image.new('RGB', (width, height), color=bg_color)
     draw = ImageDraw.Draw(image)
 
     # タブの描画
@@ -103,10 +91,8 @@ def generate_preview_image(preset_data):
     # フォント設定
     try:
         font = ImageFont.truetype("arial.ttf", 14)
-    except IOError:
+    except OSError:
         font = ImageFont.load_default()
-
-    text_color = preset_data.get("global_color", "#000000")
 
     draw.text((title_x + 10, title_y + 5), "Main Tab", fill=text_color, font=font)
     draw.text((rect_x + 10, rect_y + 15), "Player Name", fill=text_color, font=font)
@@ -118,20 +104,213 @@ def generate_preview_image(preset_data):
     buffer.seek(0)
     return buffer
 
-# 起動時に設定をロード
-server_settings_cache = load_all_settings()
 
-# Intentsの設定（メッセージ内容と添付ファイルの読み取り権限が必要）
-intents = discord.Intents.default()
-intents.message_content = True
+def persist_settings():
+    save_settings(SETTINGS_FILE, server_settings_cache)
 
-client = discord.Client(intents=intents)
+
+async def send_with_preview(channel, text, preview_data, preview_filename):
+    preview_buf = generate_preview_image(preview_data)
+    if preview_buf:
+        await channel.send(text, file=discord.File(preview_buf, filename=preview_filename))
+    else:
+        await channel.send(text)
+
+
+async def delete_message_later(msg, delay):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except discord.Forbidden:
+        logger.warning("権限エラー: メッセージを削除できませんでした。Botに「メッセージの管理」権限を与えてください。")
+    except discord.HTTPException:
+        logger.debug("元のメッセージを削除できませんでした", exc_info=True)
+
+
+def schedule_message_delete(msg, delay):
+    task = asyncio.create_task(delete_message_later(msg, delay))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 @client.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
-    print('準備完了: HTMLファイルをアップロードすると自動で変換します。')
+    logger.info('Logged in as %s', client.user)
+    logger.info('準備完了: HTMLファイルをアップロードすると自動で変換します。')
     await client.change_presence(activity=discord.Game(name="!help | ログ変換"))
+
+
+async def handle_color_command(message, command, args, guild_key):
+    spec = COLOR_COMMANDS[command]
+    if not args:
+        await message.channel.send(f"ℹ️ 使用法: `{command} #RRGGBB` (例: `{command} {spec.example}`)")
+        return
+
+    color = args[0]
+    if not apply_color_setting(server_settings_cache, guild_key, spec.setting_key, color):
+        await message.channel.send(f"{COLOR_FORMAT_ERROR} (例: `{command} {spec.example}`)")
+        return
+
+    persist_settings()
+    await send_with_preview(
+        message.channel,
+        spec.success_message.format(color=color),
+        server_settings_cache[guild_key],
+        spec.preview_filename,
+    )
+
+
+async def handle_auto_delete_command(message, args, guild_key):
+    if not args:
+        await message.channel.send("ℹ️ 使用法: `!set_auto_delete 秒数` (例: `!set_auto_delete 60`)\n※0を指定すると自動削除が無効になります。\n※有効にすると、変換結果と元のメッセージの両方が削除されます。")
+        return
+
+    try:
+        seconds = parse_auto_delete_seconds(args[0])
+    except ValueError:
+        await message.channel.send("❌ 秒数は0以上の整数で指定してください。")
+        return
+
+    apply_auto_delete_time(server_settings_cache, guild_key, seconds)
+    persist_settings()
+
+    if seconds == 0:
+        await message.channel.send("⏱️ 自動削除を **無効** にしました。")
+    else:
+        await message.channel.send(f"⏱️ 自動削除時間を `{seconds}` 秒に設定しました。\n（変換結果と元のメッセージが対象です）")
+
+
+async def handle_preset_command(message, args, guild_key):
+    if not args:
+        preset_list = "\n".join([f"- `{k}` : {v['description']}" for k, v in PRESETS.items()])
+        await message.channel.send(f"ℹ️ 使用法: `!preset プリセット名`\n**利用可能なプリセット:**\n{preset_list}")
+        return
+
+    preset_name = args[0].lower()
+    preset = apply_preset(server_settings_cache, guild_key, preset_name)
+    if preset is None:
+        await message.channel.send(f"❌ プリセット `{display_filename(preset_name)}` は存在しません。")
+        return
+
+    persist_settings()
+    await send_with_preview(
+        message.channel,
+        f"🎨 設定をプリセット `{preset_name}` ({preset['description']}) に変更しました。",
+        preset,
+        f"preview_{preset_name}.png",
+    )
+
+
+async def handle_reset_command(message, guild_key):
+    if reset_guild_settings(server_settings_cache, guild_key):
+        persist_settings()
+        await send_with_preview(message.channel, "⚙️ このサーバーの設定を初期化しました。", {}, "preview_reset.png")
+    else:
+        await message.channel.send("ℹ️ カスタム設定は保存されていません。")
+
+
+async def handle_settings_command(message, guild_key):
+    guild_config = server_settings_cache.get(guild_key, {})
+
+    def shown(key):
+        value = guild_config.get(key)
+        return value if is_valid_color(value) else f"{DEFAULT_SETTINGS[key]} (デフォルト)"
+
+    auto_delete = get_auto_delete_time(guild_config)
+    auto_delete_str = f"{auto_delete}秒" if auto_delete > 0 else "無効"
+
+    settings_text = (
+        f"**現在の設定**\n"
+        f"🎨 全体背景色: `{shown('global_background')}`\n"
+        f"🎨 文字色: `{shown('global_color')}`\n"
+        f"🎨 タブ背景色: `{shown('tab_default_background')}`\n"
+        f"🎨 タブ枠線色: `{shown('tab_default_border')}`\n"
+        f"⏱️ 自動削除: `{auto_delete_str}`"
+    )
+    await send_with_preview(message.channel, settings_text, guild_config, "preview_settings.png")
+
+
+async def handle_help_command(message):
+    help_text = (
+        "**TRPGログ整形Botの使い方**\n"
+        "メンションまたはコマンド(!...)と共にHTMLログファイルをアップロードすると、自動で色設定を行い整形して返します。\n\n"
+        "**設定コマンド** (サーバーごとに保存されます)\n"
+        "`!settings` : 現在の設定を表示\n"
+        "`!preset name` : プリセットを適用 (light/dark/black)\n"
+        "`!set_bg #RRGGBB` : 全体の背景色を変更\n"
+        "`!set_text_color #RRGGBB` : 文字色を変更\n"
+        "`!set_tab_bg #RRGGBB` : タブの背景色を変更\n"
+        "`!set_tab_border #RRGGBB` : タブの枠線色を変更\n"
+        "`!set_auto_delete 秒数` : 結果と元メッセージの自動削除時間を設定 (0で無効)\n"
+        "`!reset_settings` : 設定を初期状態(白背景)に戻す\n"
+    )
+    await message.channel.send(help_text)
+
+
+async def convert_attachment(message, attachment, guild_key):
+    """添付されたHTMLログを変換して返信する。内部例外の詳細は返信せずログに出力する。"""
+    shown_name = display_filename(attachment.filename)
+
+    # 変換前にサイズを検査する
+    if is_attachment_too_large(attachment.size):
+        limit_mb = MAX_ATTACHMENT_BYTES // (1024 * 1024)
+        await message.channel.send(f"{message.author.mention} ❌ `{shown_name}` はファイルサイズが大きすぎます（上限 {limit_mb}MB）。")
+        return
+
+    processing_msg = await message.channel.send(f'🔄 `{shown_name}` を変換しています...')
+    try:
+        raw = await attachment.read()
+        if len(raw) > MAX_ATTACHMENT_BYTES:
+            await message.channel.send(f"{message.author.mention} ❌ `{shown_name}` はファイルサイズが大きすぎます。")
+            return
+        html_text = raw.decode("utf-8")
+
+        guild_config = server_settings_cache.get(guild_key, {})
+        bot_settings = build_bot_settings(guild_config, attachment.filename)
+        logger.info("Converting: %s (Guild: %s)", attachment.filename, guild_key)
+
+        # 大きいログでもイベントループを止めないよう、別スレッドで変換する
+        formatted_html = await asyncio.to_thread(build_formatted_html_from_string, html_text, bot_settings)
+        output = package_output(formatted_html, attachment.filename)
+
+        auto_delete_time = get_auto_delete_time(guild_config)
+        delete_param = auto_delete_time if auto_delete_time > 0 else None
+        delete_msg = ""
+        if delete_param:
+            delete_msg = f"\n※このメッセージは{auto_delete_time}秒後に自動削除されます。（元のメッセージも削除されます）"
+
+        zip_note = "(サイズ調整のためZIP圧縮済み)" if output.zipped else ""
+        content_msg = f"{message.author.mention} ✅ `{shown_name}` の変換が完了しました！{zip_note}{delete_msg}"
+
+        discord_file = discord.File(fp=io.BytesIO(output.data), filename=output.filename)
+        await message.channel.send(content=content_msg, file=discord_file, delete_after=delete_param)
+
+        # 元のメッセージも設定時間後に削除
+        if delete_param:
+            schedule_message_delete(message, delete_param)
+
+    except UnicodeDecodeError:
+        logger.warning("UTF-8として読み取れないファイル: %s", attachment.filename, exc_info=True)
+        await message.channel.send(f"{message.author.mention} {DECODE_ERROR}")
+
+    except discord.HTTPException as e:
+        logger.exception("Discord HTTP Error converting %s", attachment.filename)
+        if e.status == 413:
+            await message.channel.send(f"{message.author.mention} ❌ ファイルサイズが大きすぎて送信できませんでした（圧縮後も制限超過）。")
+        else:
+            await message.channel.send(f"{message.author.mention} {DISCORD_ERROR}")
+
+    except Exception:
+        logger.exception("Error converting %s", attachment.filename)
+        await message.channel.send(f"{message.author.mention} {CONVERT_ERROR}")
+
+    finally:
+        # 変換中メッセージを削除
+        try:
+            await processing_msg.delete()
+        except discord.HTTPException:
+            logger.debug("変換中メッセージを削除できませんでした", exc_info=True)
+
 
 @client.event
 async def on_message(message):
@@ -143,235 +322,33 @@ async def on_message(message):
     if ALLOWED_CHANNEL_IDS and message.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
+    command, args = parse_command(message.content)
+    # サーバーIDを取得 (DMの場合は 'dm')
+    guild_key = get_guild_key(message.guild.id if message.guild else None)
+
     # --- 設定コマンドの処理 ---
-
-    # 背景色の設定: !set_bg #RRGGBB
-    if message.content.startswith('!set_bg'):
-        parts = message.content.split()
-        if len(parts) < 2:
-            await message.channel.send("ℹ️ 使用法: `!set_bg #RRGGBB` (例: `!set_bg #000000`)")
-            return
-
-        color = parts[1]
-        # サーバーIDを取得 (DMの場合は 'dm')
-        guild_id = str(message.guild.id) if message.guild else "dm"
-
-        if guild_id not in server_settings_cache:
-            server_settings_cache[guild_id] = {}
-
-        server_settings_cache[guild_id]["global_background"] = color
-        save_all_settings(server_settings_cache)
-
-        msg_text = f"🎨 このサーバーの背景色を `{color}` に設定しました。"
-        preview_buf = generate_preview_image(server_settings_cache[guild_id])
-        if preview_buf:
-            file = discord.File(preview_buf, filename="preview_bg.png")
-            await message.channel.send(msg_text, file=file)
-        else:
-            await message.channel.send(msg_text)
+    if command in COLOR_COMMANDS:
+        await handle_color_command(message, command, args, guild_key)
         return
 
-    # 文字色の設定: !set_text_color #RRGGBB
-    if message.content.startswith('!set_text_color'):
-        parts = message.content.split()
-        if len(parts) < 2:
-            await message.channel.send("ℹ️ 使用法: `!set_text_color #RRGGBB` (例: `!set_text_color #ffffff`)")
-            return
-
-        color = parts[1]
-        # サーバーIDを取得 (DMの場合は 'dm')
-        guild_id = str(message.guild.id) if message.guild else "dm"
-
-        if guild_id not in server_settings_cache:
-            server_settings_cache[guild_id] = {}
-
-        server_settings_cache[guild_id]["global_color"] = color
-        save_all_settings(server_settings_cache)
-
-        msg_text = f"🎨 このサーバーの文字色を `{color}` に設定しました。"
-        preview_buf = generate_preview_image(server_settings_cache[guild_id])
-        if preview_buf:
-            file = discord.File(preview_buf, filename="preview_text_color.png")
-            await message.channel.send(msg_text, file=file)
-        else:
-            await message.channel.send(msg_text)
+    if command == '!set_auto_delete':
+        await handle_auto_delete_command(message, args, guild_key)
         return
 
-    # タブ背景色の設定: !set_tab_bg #RRGGBB
-    if message.content.startswith('!set_tab_bg'):
-        parts = message.content.split()
-        if len(parts) < 2:
-            await message.channel.send("ℹ️ 使用法: `!set_tab_bg #RRGGBB` (例: `!set_tab_bg #ffffff`)")
-            return
-
-        color = parts[1]
-        # サーバーIDを取得 (DMの場合は 'dm')
-        guild_id = str(message.guild.id) if message.guild else "dm"
-
-        if guild_id not in server_settings_cache:
-            server_settings_cache[guild_id] = {}
-
-        server_settings_cache[guild_id]["tab_default_background"] = color
-        save_all_settings(server_settings_cache)
-
-        msg_text = f"🎨 タブのデフォルト背景色を `{color}` に設定しました。"
-        preview_buf = generate_preview_image(server_settings_cache[guild_id])
-        if preview_buf:
-            file = discord.File(preview_buf, filename="preview_tab_bg.png")
-            await message.channel.send(msg_text, file=file)
-        else:
-            await message.channel.send(msg_text)
+    if command == '!preset':
+        await handle_preset_command(message, args, guild_key)
         return
 
-    # タブボーダー色の設定: !set_tab_border #RRGGBB
-    if message.content.startswith('!set_tab_border'):
-        parts = message.content.split()
-        if len(parts) < 2:
-            await message.channel.send("ℹ️ 使用法: `!set_tab_border #RRGGBB` (例: `!set_tab_border #999999`)")
-            return
-
-        color = parts[1]
-        # サーバーIDを取得 (DMの場合は 'dm')
-        guild_id = str(message.guild.id) if message.guild else "dm"
-
-        if guild_id not in server_settings_cache:
-            server_settings_cache[guild_id] = {}
-
-        server_settings_cache[guild_id]["tab_default_border"] = color
-        save_all_settings(server_settings_cache)
-
-        msg_text = f"🎨 タブのデフォルトボーダー色を `{color}` に設定しました。"
-        preview_buf = generate_preview_image(server_settings_cache[guild_id])
-        if preview_buf:
-            file = discord.File(preview_buf, filename="preview_tab_border.png")
-            await message.channel.send(msg_text, file=file)
-        else:
-            await message.channel.send(msg_text)
+    if command == '!reset_settings' and not args:
+        await handle_reset_command(message, guild_key)
         return
 
-    # 自動削除時間の設定: !set_auto_delete seconds
-    if message.content.startswith('!set_auto_delete'):
-        parts = message.content.split()
-        if len(parts) < 2:
-            await message.channel.send("ℹ️ 使用法: `!set_auto_delete 秒数` (例: `!set_auto_delete 60`)\n※0を指定すると自動削除が無効になります。\n※有効にすると、変換結果と元のメッセージの両方が削除されます。")
-            return
-
-        try:
-            seconds = int(parts[1])
-            if seconds < 0:
-                raise ValueError
-        except ValueError:
-            await message.channel.send("❌ 秒数は0以上の整数で指定してください。")
-            return
-
-        guild_id = str(message.guild.id) if message.guild else "dm"
-        if guild_id not in server_settings_cache:
-            server_settings_cache[guild_id] = {}
-
-        server_settings_cache[guild_id]["auto_delete_time"] = seconds
-        save_all_settings(server_settings_cache)
-
-        if seconds == 0:
-            await message.channel.send("⏱️ 自動削除を **無効** にしました。")
-        else:
-            await message.channel.send(f"⏱️ 自動削除時間を `{seconds}` 秒に設定しました。\n（変換結果と元のメッセージが対象です）")
+    if command == '!settings' and not args:
+        await handle_settings_command(message, guild_key)
         return
 
-    # プリセット設定: !preset name
-    if message.content.startswith('!preset'):
-        parts = message.content.split()
-        if len(parts) < 2:
-            preset_list = "\n".join([f"- `{k}` : {v['description']}" for k, v in PRESETS.items()])
-            await message.channel.send(f"ℹ️ 使用法: `!preset プリセット名`\n**利用可能なプリセット:**\n{preset_list}")
-            return
-
-        preset_name = parts[1].lower()
-        if preset_name not in PRESETS:
-            await message.channel.send(f"❌ プリセット `{preset_name}` は存在しません。")
-            return
-
-        preset = PRESETS[preset_name]
-        guild_id = str(message.guild.id) if message.guild else "dm"
-
-        if guild_id not in server_settings_cache:
-            server_settings_cache[guild_id] = {}
-
-        server_settings_cache[guild_id]["global_background"] = preset["global_background"]
-        server_settings_cache[guild_id]["global_color"] = preset["global_color"]
-        server_settings_cache[guild_id]["tab_default_background"] = preset["tab_default_background"]
-        server_settings_cache[guild_id]["tab_default_border"] = preset["tab_default_border"]
-        save_all_settings(server_settings_cache)
-
-        preview_buf = generate_preview_image(preset)
-        if preview_buf:
-            file = discord.File(preview_buf, filename=f"preview_{preset_name}.png")
-            await message.channel.send(f"🎨 設定をプリセット `{preset_name}` ({preset['description']}) に変更しました。", file=file)
-        else:
-            await message.channel.send(f"🎨 設定をプリセット `{preset_name}` ({preset['description']}) に変更しました。")
-        return
-
-    # 設定リセット: !reset_settings
-    if message.content == '!reset_settings':
-        guild_id = str(message.guild.id) if message.guild else "dm"
-        if guild_id in server_settings_cache:
-            del server_settings_cache[guild_id]
-            save_all_settings(server_settings_cache)
-            msg_text = "⚙️ このサーバーの設定を初期化しました。"
-            preview_buf = generate_preview_image({}) # デフォルト値でプレビュー
-            if preview_buf:
-                file = discord.File(preview_buf, filename="preview_reset.png")
-                await message.channel.send(msg_text, file=file)
-            else:
-                await message.channel.send(msg_text)
-        else:
-            await message.channel.send("ℹ️ カスタム設定は保存されていません。")
-        return
-
-    # 設定確認: !settings
-    if message.content == '!settings':
-        guild_id = str(message.guild.id) if message.guild else "dm"
-        guild_config = server_settings_cache.get(guild_id, {})
-
-        bg_color = guild_config.get("global_background", "#ffffff (デフォルト)")
-        text_color = guild_config.get("global_color", "#000000 (デフォルト)")
-        tab_bg = guild_config.get("tab_default_background", "#ffffff (デフォルト)")
-        tab_border = guild_config.get("tab_default_border", "#999999 (デフォルト)")
-        auto_delete = guild_config.get("auto_delete_time", 60)
-
-        auto_delete_str = f"{auto_delete}秒" if auto_delete > 0 else "無効"
-
-        settings_text = (
-            f"**現在の設定**\n"
-            f"🎨 全体背景色: `{bg_color}`\n"
-            f"🎨 文字色: `{text_color}`\n"
-            f"🎨 タブ背景色: `{tab_bg}`\n"
-            f"🎨 タブ枠線色: `{tab_border}`\n"
-            f"⏱️ 自動削除: `{auto_delete_str}`"
-        )
-        preview_buf = generate_preview_image(guild_config)
-        if preview_buf:
-            file = discord.File(preview_buf, filename="preview_settings.png")
-            await message.channel.send(settings_text, file=file)
-        else:
-            await message.channel.send(settings_text)
-        return
-
-    # ヘルプコマンド: !help
-    if message.content == '!help':
-        help_text = (
-            "**TRPGログ整形Botの使い方**\n"
-            "メンションまたはコマンド(!...)と共にHTMLログファイルをアップロードすると、自動で色設定を行い整形して返します。\n\n"
-            "**設定コマンド** (サーバーごとに保存されます)\n"
-            "`!settings` : 現在の設定を表示\n"
-            "`!preset name` : プリセットを適用 (light/dark/black)\n"
-            "`!set_bg #RRGGBB` : 全体の背景色を変更\n"
-            "`!set_text_color #RRGGBB` : 文字色を変更\n"
-            "`!set_tab_bg #RRGGBB` : タブの背景色を変更\n"
-            "`!set_tab_border #RRGGBB` : タブの枠線色を変更\n"
-            "`!set_auto_delete 秒数` : 結果と元メッセージの自動削除時間を設定 (0で無効)\n"
-            "`!reset_settings` : 設定を初期状態(白背景)に戻す\n"
-        )
-        await message.channel.send(help_text)
+    if command == '!help' and not args:
+        await handle_help_command(message)
         return
 
     # 添付ファイルがあるか確認
@@ -382,120 +359,30 @@ async def on_message(message):
 
         for attachment in message.attachments:
             # HTMLファイルのみ対象（拡張子チェック）
-            if attachment.filename.lower().endswith('.html'):
-                processing_msg = await message.channel.send(f'🔄 `{attachment.filename}` を変換しています...')
+            if is_html_filename(attachment.filename):
+                await convert_attachment(message, attachment, guild_key)
 
-                tmp_input_path = None
-                try:
-                    # 1. 添付ファイルを一時ファイルとして保存
-                    # renderer.py はファイルパスを要求するため、一度ディスクに保存します
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_input:
-                        tmp_input_path = tmp_input.name
-                        await attachment.save(tmp_input.name)
 
-                    # 2. Bot用の設定（サーバー設定を適用）
-                    guild_id = str(message.guild.id) if message.guild else "dm"
-                    guild_config = server_settings_cache.get(guild_id, {})
+def main():
+    # 起動時にのみ .env とサーバー設定を読み込み、Webサーバーを起動する
+    from dotenv import load_dotenv
 
-                    # 設定値の取得（デバッグ用に変数化してログ出力）
-                    bg_color = guild_config.get("global_background", "#ffffff")
-                    text_color = guild_config.get("global_color", "#000000")
+    from keep_alive import keep_alive
 
-                    print(f"[Log] Converting: {attachment.filename} (Guild: {guild_id})")
-                    print(f"[Log] Apply Settings -> BG: {bg_color}, Text: {text_color}")
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-                    bot_settings = {
-                        "global_background": bg_color,
-                        "global_color": text_color,
-                        "html_title": f"Converted: {attachment.filename}",
-                        "tabs": {},    # 特定のタブ色を指定したい場合はここに記述
-                        "players": {}, # 特定のプレイヤー色を指定したい場合はここに記述
-                        "tab_default_background": guild_config.get("tab_default_background", "#ffffff"),
-                        "tab_default_border": guild_config.get("tab_default_border", "#999999")
-                    }
+    token = os.getenv('DISCORD_BOT_TOKEN')
+    if not token:
+        raise ValueError("Botトークンが設定されていません。.envファイルを作成し、DISCORD_BOT_TOKENを設定してください。")
 
-                    # 3. 変換処理を実行
-                    # build_formatted_html はファイルパスを受け取り、HTML文字列を返します
-                    formatted_html = build_formatted_html(tmp_input_path, settings=bot_settings)
+    server_settings_cache.clear()
+    server_settings_cache.update(load_settings(SETTINGS_FILE))
 
-                    # バイトデータに変換してサイズを確認
-                    html_bytes = formatted_html.encode('utf-8')
+    # Webサーバーを起動してポートをリッスン（Render等のWeb Service用）
+    keep_alive()
+    client.run(token)
 
-                    # 自動削除設定の取得 (デフォルト60秒)
-                    auto_delete_time = guild_config.get("auto_delete_time", 60)
-                    delete_msg = ""
-                    delete_param = None
-                    if auto_delete_time > 0:
-                        delete_msg = f"\n※このメッセージは{auto_delete_time}秒後に自動削除されます。（元のメッセージも削除されます）"
-                        delete_param = auto_delete_time
 
-                    # 4. 結果をDiscordに送信
-                    # ファイルサイズが7.5MBを超える場合は自動的にZIP圧縮を行う
-                    # (Discordの通常制限8MBに対する安全マージン)
-                    LIMIT_SIZE = 7.5 * 1024 * 1024
-
-                    send_buffer = io.BytesIO()
-                    send_filename = f"formatted_{attachment.filename}"
-                    content_msg = f"{message.author.mention} ✅ `{attachment.filename}` の変換が完了しました！{delete_msg}"
-
-                    if len(html_bytes) > LIMIT_SIZE:
-                        # ZIP圧縮 (最高圧縮率 compresslevel=9 を指定)
-                        with zipfile.ZipFile(send_buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-                            zf.writestr(send_filename, html_bytes)
-                        send_filename += ".zip"
-                        content_msg = f"{message.author.mention} ✅ `{attachment.filename}` の変換が完了しました！(サイズ調整のためZIP圧縮済み){delete_msg}"
-                    else:
-                        # そのまま書き込み
-                        send_buffer.write(html_bytes)
-
-                    # バッファの先頭に戻す
-                    send_buffer.seek(0)
-
-                    discord_file = discord.File(fp=send_buffer, filename=send_filename)
-                    await message.channel.send(
-                        content=content_msg,
-                        file=discord_file,
-                        delete_after=delete_param
-                    )
-
-                    # 元のメッセージも設定時間後に削除
-                    if delete_param:
-                        # バックグラウンドで削除を実行（権限エラーをログに出力）
-                        async def delete_user_message(msg, delay):
-                            await asyncio.sleep(delay)
-                            try:
-                                await msg.delete()
-                            except discord.Forbidden:
-                                print(f"⚠️ 権限エラー: メッセージを削除できませんでした。Botに「メッセージの管理」権限を与えてください。")
-                            except Exception:
-                                pass
-                        asyncio.create_task(delete_user_message(message, delete_param))
-
-                except discord.HTTPException as e:
-                    if e.status == 413:
-                        await message.channel.send(f"{message.author.mention} ❌ ファイルサイズが大きすぎて送信できませんでした（圧縮後も制限超過）。")
-                    else:
-                        await message.channel.send(f"{message.author.mention} ❌ Discordエラーが発生しました: {e}")
-                    print(f"Discord HTTP Error converting {attachment.filename}: {e}")
-
-                except Exception as e:
-                    await message.channel.send(f"{message.author.mention} ❌ エラーが発生しました: {e}")
-                    print(f"Error converting {attachment.filename}: {e}")
-
-                finally:
-                    # 変換中メッセージを削除
-                    try:
-                        await processing_msg.delete()
-                    except Exception:
-                        pass
-
-                    # 5. 入力用の一時ファイルを削除（後始末）
-                    if tmp_input_path and os.path.exists(tmp_input_path):
-                        try:
-                            os.remove(tmp_input_path)
-                        except Exception as e:
-                            print(f"Error removing temp file: {e}")
-
-# Webサーバーを起動してポートをリッスン（Render等のWeb Service用）
-keep_alive()
-client.run(TOKEN)
+if __name__ == "__main__":
+    main()
