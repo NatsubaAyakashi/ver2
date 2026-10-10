@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>XSS Log</title>
+</head>
+<body>
+<div class="tab">
+  <div class="tabtitle">&lt;script&gt;alert('tab')&lt;/script&gt;</div>
+  <p style="color:#ff0000"><b>&lt;img src=x onerror=alert('name')&gt;</b><span>&lt;script&gt;alert('body')&lt;/script&gt; ＞ 5</span></p>
+</div>
+</body>
+</html>
